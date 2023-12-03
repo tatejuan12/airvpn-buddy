@@ -9,15 +9,15 @@ import time
 
 
 def main():
-    stop_active_vpn_connections()
-    vpn = requests.get('https://airvpn.org/api/status/')
+    vpn = get_vpn_data("https://airvpn.org/api/status/")
     vpn_json = json.loads(vpn.content)
     valid_servers = []
     i = 0
     while not valid_servers and i < 20:
         for server in vpn_json['servers']:
-            if server['country_code'] not in config.country_codes:
-                continue
+            if config.country_codes:
+                if server['country_code'] not in config.country_codes:
+                    continue
             if server['health'] != 'ok':
                 continue
             if server['currentload'] > config.cutoff_load_percentage:
@@ -30,6 +30,7 @@ def main():
                 continue
             server['ping'] = ping_ms
             server['score'] = calculate_score(server, config.cutoff_bias, config.cutoff_ms, config.cutoff_load_percentage)
+            # print(server)
             valid_servers.append(server)
             valid_servers.sort(key=lambda x: x['score'], reverse=True)
         if not valid_servers:
@@ -37,12 +38,14 @@ def main():
             config.cutoff_load_percentage += 5
         i += 1
 
-    if not valid_servers[0]:
+    if not valid_servers:
         raise Exception("No acceptable servers were found!")
+
     headers = {
         "API-KEY": config.api
     }
     response = requests.get(f"https://airvpn.org/api/generator/?protocols={config.protocol}&servers={valid_servers[0]['public_name']}&device={config.device_name}", headers=headers)
+    stop_active_vpn_connections()
     if "openvpn" in config.protocol:
         if not config.nmcli:
             connect_to_openvpn(response.text)
@@ -50,6 +53,21 @@ def main():
             connect_to_openvpn_with_nmcli(response.text)
     else:
         connect_to_wireguard(response.text)
+    print("Connected\n\n")
+    print(valid_servers[0])
+
+
+def get_vpn_data(url, retries=5, backoff_factor=10):
+    for i in range(retries):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            return response  # or whatever processing you need
+        except requests.exceptions.RequestException as e:
+            if i == retries - 1:  # If this was the last attempt
+                raise "Could not connect to server"
+            else:
+                time.sleep(backoff_factor * (2 ** i))  # exponential back-off
 
 
 def calculate_score(server, cutoff_bias, cutoff_ms, cutoff_load_percentage):
@@ -72,7 +90,7 @@ def calculate_score(server, cutoff_bias, cutoff_ms, cutoff_load_percentage):
         weight_ping = 0.5
         weight_load = 0.5
 
-    score = 100 * (weight_ping * normalized_ping + weight_load * normalized_load)
+    score = 100 * (1-(weight_ping * normalized_ping + weight_load * normalized_load))
 
     return score
 
@@ -81,7 +99,7 @@ script_dir = os.path.dirname(os.path.realpath(__file__))
 
 
 def connect_to_wireguard(config_text):
-    path = os.path.join("/tmp", "AirBuddyWG.conf")
+    path = os.path.join("/etc/wireguard", "AirBuddyWG.conf")
     with open(path, 'w') as file:
         file.write(config_text)
     command = ['wg-quick', 'up', path]
@@ -145,7 +163,7 @@ def stop_active_vpn_connections():
     wg_show_command = ['sudo', 'wg', 'show', "AirBuddyWG"]
     process = subprocess.run(wg_show_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if process.returncode == 0:
-        wgpath = os.path.join("/tmp", "AirBuddyWG.conf")
+        wgpath = os.path.join("/etc/wireguard", "AirBuddyWG.conf")
         # If a WireGuard connection is active, stop it
         wg_stop_command = ['wg-quick', 'down', wgpath]
         subprocess.run(wg_stop_command, check=True)
